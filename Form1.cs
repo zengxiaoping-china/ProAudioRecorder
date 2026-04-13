@@ -73,18 +73,26 @@ namespace ProAudioRecorder
             this.trackProgress.MouseDown += new System.Windows.Forms.MouseEventHandler(this.trackProgress_MouseDown);
             this.trackProgress.MouseUp += new System.Windows.Forms.MouseEventHandler(this.trackProgress_MouseUp);
 
-            // ★★★ 绑定音量条的滚动事件 ★★★
+            // 绑定进度条的滚动事件
+            this.trackProgress.Scroll += new EventHandler(this.trackProgress_Scroll);
+
+            // 绑定音量条的滚动事件
             this.trackVolume.Scroll += new System.EventHandler(this.trackVolume_Scroll);
 
-            // ★★★ 绑定静音复选框的状态改变事件 ★★★
+            // 绑定静音复选框的状态改变事件
             this.chkMute.CheckedChanged += new System.EventHandler(this.chkMute_CheckedChanged);
 
             // 绑定定时器的时间触发事件
             timerRecording.Tick += timerRecording_Tick;
 
+            //初始化录音按键
+            isRecording = true; // 开始录音按钮可用状态
+            btnStopRec.Enabled = false;//暂停录音按钮可用状态
+            btnPauseRec.Enabled = false;//停止录音按钮可用状态
+
             // 初始化定时器
             uiTimer = new System.Windows.Forms.Timer();
-            uiTimer.Interval = 1; // 1毫秒刷新一次，人眼看起来很顺滑
+            uiTimer.Interval = 1; // 1毫秒刷新一次
             uiTimer.Tick += UiTimer_Tick;
             uiTimer.Start();
 
@@ -125,16 +133,16 @@ namespace ProAudioRecorder
                 return; // 刚创建说明是空的，直接返回
             }
 
-            // 先清空列表，防止重复添加
+            // 2.先清空列表，防止重复添加
             lstFiles.Items.Clear();
 
-            // 2. 获取所有 .wav 文件
+            // 3. 获取所有 .wav 文件
             string[] files = Directory.GetFiles(_recordingsFolder, "*.wav");
 
-            // 3. 使用 LINQ 将文件列表倒序排列（最新的在前面）
+            // 4. 使用 LINQ 将文件列表倒序排列（最新的在前面）
             var sortedFiles = files.OrderByDescending(f => f).ToArray();
 
-            // 4. 添加到列表
+            // 5. 添加到列表
             foreach (string file in sortedFiles)
             {
                 string fileName = Path.GetFileName(file);
@@ -296,7 +304,7 @@ namespace ProAudioRecorder
             }
         }
 
-        // --- 定时器触发事件（每100毫秒执行一次） ---
+        // --- 定时器触发事件（每100毫秒执行一次）更新录音时长 ---
         private void timerRecording_Tick(object sender, EventArgs e)
         {
             // 只有在录音中且没有暂停时才更新
@@ -362,6 +370,7 @@ namespace ProAudioRecorder
                     targetValue = 0;    // 目标设为0
                     currentValue = 0;   // 当前显示设为0
                     progLevel.Value = 0; // 立即刷新界面
+
                     // 注意：这里不要释放 waveIn 和 writer，否则无法继续写文件！
                 }));
                 return; // 直接返回，不要执行后面的释放代码！
@@ -396,19 +405,16 @@ namespace ProAudioRecorder
                 // 添加文件到列表
                 if (!string.IsNullOrEmpty(currentFilePath))
                 {
-                    // 直接重新加载列表，不要手动添加
-                    // 这样会自动应用 OrderByDescending 的逻辑，新文件就会在最上面
-                    LoadExistingRecordings();
-                    // 选中第 0 行（也就是最新的那个文件）
+                    LoadExistingRecordings();// 重新加载列表会自动选中最新的录音文件
                     if (lstFiles.Items.Count > 0)
                     {
-                        lstFiles.SelectedIndex = 0;
+                        lstFiles.SelectedIndex = 0;// 自动选中最新的录音文件
                     }
                 }
 
-                timerRecording.Stop();
-                progLevel.Value = 0;
-                lblDuration.Text = "00:00:00";
+                timerRecording.Stop();// 停止计时器
+                progLevel.Value = 0;//电平条重置
+                lblDuration.Text = "00:00:00";//时长标签重置
             }));
         }
 
@@ -431,11 +437,12 @@ namespace ProAudioRecorder
             try
             {
                 // 1. 底层暂停（注意：WaveInEvent 的 Pause 方法只是暂停回调，文件流还是开着的）
-                waveIn?.StopRecording(); // 注意：NAudio 的 WaveInEvent 其实没有真正的 Pause，通常是用 StopRecording 模拟，但为了不触发 RecordingStopped，我们需要特殊处理，或者直接用 StopRecording 并在逻辑里判断。
-                                         // 修正：WaveInEvent 实际上没有 Pause 方法，只有 Start 和 Stop。
-                                         // 为了模拟暂停，我们调用 StopRecording，但在 RecordingStopped 事件里要判断是不是“暂停”。
-                                         // 但更简单的做法是：直接停止数据回调，但保持文件流打开。
-                                         // 这里我们沿用 StopRecording，配合 isPaused 标志位。
+                waveIn?.StopRecording(); 
+                // 注意：NAudio 的 WaveInEvent 其实没有真正的 Pause，通常是用 StopRecording 模拟，但为了不触发 RecordingStopped，我们需要特殊处理，或者直接用 StopRecording 并在逻辑里判断。
+                // 修正：WaveInEvent 实际上没有 Pause 方法，只有 Start 和 Stop。
+                // 为了模拟暂停，我们调用 StopRecording，但在 RecordingStopped 事件里要判断是不是“暂停”。
+                // 但更简单的做法是：直接停止数据回调，但保持文件流打开。
+                // 这里我们沿用 StopRecording，配合 isPaused 标志位。
 
                 // 实际上，WaveInEvent.StopRecording() 会触发 RecordingStopped。
                 // 为了不把事情搞复杂，我们这里直接用 .Pause() 如果有的话，或者仅仅停止数据写入。
@@ -465,18 +472,40 @@ namespace ProAudioRecorder
             StartPlayback();
         }
 
+        // 进度更新计时器事件
         private void ProgressTimer_Tick(object sender, EventArgs e)
         {
-            if (audioFile != null && !isUserDragging)
+            // 1. 确保音频文件存在且已初始化
+            if (audioFile == null) return;
+
+            // 2. 只有当用户没在拖动时，才更新进度条
+            if (!isUserDragging)
             {
-                // 获取当前播放时间（秒）
-                double currentTime = audioFile.CurrentTime.TotalSeconds;
+                try
+                {
+                    // 获取当前播放时间（秒）
+                    double currentTimeSeconds = audioFile.CurrentTime.TotalSeconds;
 
-                // 只有当用户没在拖动时，才更新进度条
-                trackProgress.Value = (int)audioFile.CurrentTime.TotalSeconds;
+                    // 确保进度条的最大值足够大 (防御性编程)
+                    if (trackProgress.Maximum < totalDuration)
+                    {
+                        trackProgress.Maximum = (int)totalDuration;
+                    }
 
-                // ★★★ 更新时间标签 ★★★
-                UpdateTimeLabel(currentTime, totalDuration);
+                    // 更新进度条 (注意：确保 currentTime 不超过 Maximum)
+                    int currentVal = (int)currentTimeSeconds;
+                    if (currentVal <= trackProgress.Maximum)
+                    {
+                        trackProgress.Value = currentVal;
+                    }
+
+                    // 更新时间标签
+                    UpdateTimeLabel(currentTimeSeconds, totalDuration);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);// 记录日志，防止 UI 线程崩溃
+                }
             }
         }
 
@@ -509,6 +538,7 @@ namespace ProAudioRecorder
             }
         }
 
+        // 播放结束事件
         private void WaveOut_PlaybackStopped(object sender, StoppedEventArgs e)
         {
             StopAndReset();
@@ -531,7 +561,7 @@ namespace ProAudioRecorder
             lblTime.Text = $"{currentStr} / {totalStr}";
         }
 
-        // 提取出来的核心播放方法
+        // 核心音频文件播放方法
         private void StartPlayback()
         {
             if (isPlaying)
@@ -602,7 +632,7 @@ namespace ProAudioRecorder
             // 1. 停止播放
             if (waveOut != null)
             {
-                // 1. 先解绑，防止旧事件干扰
+                // 1. 先解绑播放结束事件 防止旧事件干扰
                 waveOut.PlaybackStopped -= WaveOut_PlaybackStopped;
                 try
                 {
@@ -653,25 +683,22 @@ namespace ProAudioRecorder
             }
         }
 
-        // 停止 按钮
+        // 停止按钮
         private void btnStopPlay_Click(object sender, EventArgs e)
         {
-            // 直接调用我们之前写好的彻底清理方法
-            // 这样能保证进度条归零、计时器停止、资源释放
-            StopAndReset();
+            StopAndReset();// 直接调用之前写好的彻底清理方法
         }
 
+        // --- 双击文件列表文件事件 触发播放音频文件 ---
         private void lstFiles_SelectedIndexChanged(object sender, EventArgs e)
         {
             // 1. 如果没有选中任何项，直接返回
             if (lstFiles.SelectedIndex == -1) return;
 
             // 2. 获取选中的文本
-            // 注意：你的列表显示格式是 "文件名 [时长]"，例如 "2026-04-09...wav [00:30]"
             string selectedText = lstFiles.SelectedItem.ToString();
 
             // 3. 提取纯文件名
-            // 我们需要把 " [时长]" 去掉，只保留文件名
             string fileName = "";
             if (selectedText.Contains(" ["))
             {
@@ -683,14 +710,10 @@ namespace ProAudioRecorder
             }
 
             // 4. 拼接完整路径
-            // 假设你的录音文件夹路径保存在 _recordingsFolder 变量中
             currentFilePath = Path.Combine(_recordingsFolder, fileName);
-
-            // 5. 调试输出（可选）
-            // Console.WriteLine("准备播放: " + currentFilePath);
         }
 
-        // --- 新增：列表按键处理 ---
+        // --- 文件列表按键删除处理事件（可能无效） ---
         private void lstFiles_KeyDown(object? sender, KeyEventArgs e)
         {
             // 如果按下了 Delete 键，且列表里有选中项
@@ -730,6 +753,7 @@ namespace ProAudioRecorder
             }
         }
 
+        // 删除按钮事件 删除选中的文件
         private void btnDelete_Click(object sender, EventArgs e)
         {
             // 1. 检查有没有选中任何文件
@@ -739,11 +763,10 @@ namespace ProAudioRecorder
                 return; // 直接退出，不执行后面的代码
             }
 
-            // 1. 获取列表显示的完整文本（例如：xxx.wav [00:15]）
+            // 1. 获取列表显示的完整文本
             string fullText = lstFiles.SelectedItem.ToString();
 
             // 2. 提取真正的文件名
-            // 我们约定格式是 "文件名 [时长]"，所以我们可以按 " [" 分割，取第一部分
             string fileName = fullText.Split(new string[] { " [" }, StringSplitOptions.None)[0];
 
             // 3. 二次确认
@@ -753,7 +776,7 @@ namespace ProAudioRecorder
             {
                 try
                 {
-                    // 4. 拼接完整路径 (记得加上 Recordings 文件夹)
+                    // 4. 拼接完整路径
                     string recordDir = Path.Combine(Application.StartupPath, "Recordings");
                     string pathToDelete = Path.Combine(recordDir, fileName);
 
@@ -799,7 +822,6 @@ namespace ProAudioRecorder
         }
 
         //静音复选框事件
-
         private void chkMute_CheckedChanged(object sender, EventArgs e)
         {
             if (audioFile != null)

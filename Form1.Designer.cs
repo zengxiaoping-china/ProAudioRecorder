@@ -53,6 +53,7 @@
             // 
             // cmbDevices
             // 
+            cmbDevices.FlatStyle = FlatStyle.Flat;
             cmbDevices.FormattingEnabled = true;
             cmbDevices.Location = new Point(12, 12);
             cmbDevices.Name = "cmbDevices";
