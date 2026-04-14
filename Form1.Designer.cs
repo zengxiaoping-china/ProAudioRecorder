@@ -38,7 +38,7 @@
             btnPausePlay = new Button();
             btnStopPlay = new Button();
             lstFiles = new ListBox();
-            progLevel = new ProgressBar();
+            progLevel = new CustomProgressBar();
             waveFormControl1 = new WaveFormControl();
             lblStatus = new Label();
             lblDuration = new Label();
@@ -132,8 +132,10 @@
             // 
             // progLevel
             // 
+            progLevel.ProgressBarColor = Color.Lime; // 设置音量条颜色为绿色
+            progLevel.BorderColor = Color.FromArgb(210, 210, 210); // 设置边框颜色为浅灰色
             progLevel.Location = new Point(12, 249);
-            progLevel.Maximum = 30;
+            progLevel.Maximum = 20;
             progLevel.Name = "progLevel";
             progLevel.Size = new Size(399, 23);
             progLevel.TabIndex = 9;
@@ -251,7 +253,7 @@
         private Button btnPausePlay;
         private Button btnStopPlay;
         private ListBox lstFiles;
-        private ProgressBar progLevel;
+        private CustomProgressBar progLevel;
         private WaveFormControl waveFormControl1;
         private Label lblStatus;
         private Label lblDuration;

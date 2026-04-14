@@ -1,61 +1,112 @@
-using NAudio.Gui;
-using NAudio.Wasapi;
 using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
+using ProAudioRecorder.AudioUtils;
+using ProAudioRecorder.Services;
 using System;
-using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Windows.Forms;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
 namespace ProAudioRecorder
 {
+    /// <summary>
+    /// 主窗体类，负责处理用户交互和应用程序流程
+    /// </summary>
     public partial class Form1 : Form
     {
         // --- 变量声明 ---
-        private WaveInEvent? waveIn; // 录音输入
-        private WaveFileWriter? writer; // 录音文件写入
-        private WaveOutEvent? waveOut; // 播放输出
-        private AudioFileReader? audioFile; // 播放文件读取
-        private string currentFilePath = ""; // 当前录音文件路径
+        /// <summary>
+        /// 音频录制器
+        /// </summary>
+        private AudioRecorder? audioRecorder;
+        /// <summary>
+        /// 音频播放器
+        /// </summary>
+        private AudioPlayer? audioPlayer;
+        /// <summary>
+        /// 音频设备管理器
+        /// </summary>
+        private AudioDeviceManager? deviceManager;
+        /// <summary>
+        /// 文件服务
+        /// </summary>
+        private FileService? fileService;
+        /// <summary>
+        /// 当前文件路径
+        /// </summary>
+        private string currentFilePath = "";
 
-        private bool isRecording = false;
-        private bool isPlaying = false;
-        private bool isPaused = false; // --- 标记是否暂停 ---
-        private DateTime recordingStartTime; // 记录开始录音的时间点
-        private TimeSpan totalPausedDuration = TimeSpan.Zero; // 记录暂停前的总时长
-        private float currentMaxVol = 0; // 加上这一行，用来存音量
+        /// <summary>
+        /// UI刷新定时器
+        /// </summary>
+        private System.Windows.Forms.Timer uiTimer = new System.Windows.Forms.Timer();
+        /// <summary>
+        /// 目标音量（录音线程写入）
+        /// </summary>
+        private float targetValue = 0;
+        /// <summary>
+        /// 当前显示的音量（UI线程读取，用于平滑过渡）
+        /// </summary>
+        private float currentValue = 0;
 
-        private System.Windows.Forms.Timer uiTimer; // UI刷新定时器
-        private float targetValue = 0; // 目标音量（录音线程写入）
-        private float currentValue = 0; // 当前显示的音量（UI线程读取，用于平滑过渡）
+        /// <summary>
+        /// 录音文件保存的文件夹
+        /// </summary>
+        private string _recordingsFolder = Path.Combine(Application.StartupPath, "Recordings");
 
-        private string _recordingsFolder = Path.Combine(Application.StartupPath, "Recordings");// 定义录音文件保存的文件夹
+        /// <summary>
+        /// 用于更新进度条的计时器
+        /// </summary>
+        private System.Windows.Forms.Timer progressTimer = new System.Windows.Forms.Timer();
+        /// <summary>
+        /// 用于更新录音时长的计时器
+        /// </summary>
+        private System.Windows.Forms.Timer recordingTimer = new System.Windows.Forms.Timer();
 
-        private double totalDuration = 0;//// 用于存储音频总时长（秒）
+        /// <summary>
+        /// 标记用户是否正在拖动进度条
+        /// </summary>
+        private bool isUserDragging = false;
+        /// <summary>
+        /// 标记是否正在执行删除操作
+        /// </summary>
+        private bool isDeleting = false;
 
-        private System.Windows.Forms.Timer progressTimer; // 用于更新进度条的计时器
-
-        private bool isUserDragging = false;// 定义一个全局变量，用于标记用户是否正在拖动进度条
-   
-        private float previousVolume = 1.0f;// 用于记录静音前的音量，方便取消静音
-
-
+        /// <summary>
+        /// 构造函数
+        /// </summary>
         public Form1()
         {
             InitializeComponent();
 
-            // 初始化设备列表
-            InitializeDevices();
+            // 初始化服务
+            fileService = new FileService(_recordingsFolder);
+
+            // 初始化组件
+            InitializeComponents();
 
             //设置示波器最大点数
-            waveFormControl1.MaxPoints = 60;
+            waveFormControl1.MaxPoints = 1500;
+            
+            // 清空示波器
+            waveFormControl1.Clear();
 
             // 启动时加载已有的录音文件
             LoadExistingRecordings();
 
+            // 绑定事件
+            BindEvents();
+
+            // 初始化定时器
+            InitializeTimers();
+
+            //初始化录音按键
+            UpdateRecordingButtonStates();
+        }
+
+        /// <summary>
+        /// 绑定事件处理方法
+        /// </summary>
+        private void BindEvents()
+        {
             // 1. 绑定录音按钮
             btnStartPause.Click += btnStartPause_Click;
             btnStopRec.Click += btnStopRec_Click;
@@ -66,154 +117,159 @@ namespace ProAudioRecorder
             btnPausePlay.Click += btnPausePlay_Click;
             btnStopPlay.Click += btnStopPlay_Click;
 
-            //绑定文件选中事件
-            this.lstFiles.SelectedIndexChanged += new System.EventHandler(this.lstFiles_SelectedIndexChanged);
+            // 3. 绑定文件事件
+            lstFiles.SelectedIndexChanged += lstFiles_SelectedIndexChanged;
+            lstFiles.MouseDoubleClick += lstFiles_MouseDoubleClick;
+            lstFiles.KeyDown += lstFiles_KeyDown;
+            btnDelete.Click += btnDelete_Click;
 
-            //把 MouseDown 和 MouseUp 事件绑定到了进度条上
-            this.trackProgress.MouseDown += new System.Windows.Forms.MouseEventHandler(this.trackProgress_MouseDown);
-            this.trackProgress.MouseUp += new System.Windows.Forms.MouseEventHandler(this.trackProgress_MouseUp);
+            // 4. 绑定进度条事件
+            trackProgress.MouseDown += trackProgress_MouseDown;
+            trackProgress.MouseUp += trackProgress_MouseUp;
+            trackProgress.Scroll += trackProgress_Scroll;
 
-            // 绑定进度条的滚动事件
-            this.trackProgress.Scroll += new EventHandler(this.trackProgress_Scroll);
+            // 5. 绑定音量事件
+            trackVolume.Scroll += trackVolume_Scroll;
+            chkMute.CheckedChanged += chkMute_CheckedChanged;
+        }
 
-            // 绑定音量条的滚动事件
-            this.trackVolume.Scroll += new System.EventHandler(this.trackVolume_Scroll);
-
-            // 绑定静音复选框的状态改变事件
-            this.chkMute.CheckedChanged += new System.EventHandler(this.chkMute_CheckedChanged);
-
-            // 绑定定时器的时间触发事件
-            timerRecording.Tick += timerRecording_Tick;
-
-            //初始化录音按键
-            isRecording = true; // 开始录音按钮可用状态
-            btnStopRec.Enabled = false;//暂停录音按钮可用状态
-            btnPauseRec.Enabled = false;//停止录音按钮可用状态
-
-            // 初始化定时器
-            uiTimer = new System.Windows.Forms.Timer();
-            uiTimer.Interval = 1; // 1毫秒刷新一次
+        /// <summary>
+        /// 初始化定时器
+        /// </summary>
+        private void InitializeTimers()
+        {
+            // 初始化UI定时器
+            uiTimer.Interval = 50; // 50毫秒刷新一次，优化性能
             uiTimer.Tick += UiTimer_Tick;
             uiTimer.Start();
 
-            // 初始化计时器
-            progressTimer = new System.Windows.Forms.Timer();
+            // 初始化进度计时器
             progressTimer.Interval = 100; // 每 100毫秒 更新一次（0.1秒）
-            progressTimer.Tick += ProgressTimer_Tick; // 绑定更新事件
+            progressTimer.Tick += ProgressTimer_Tick;
 
+            // 初始化录音计时器
+            recordingTimer.Interval = 100; // 每 100毫秒 更新一次（0.1秒）
+            recordingTimer.Tick += RecordingTimer_Tick;
+        }
+
+        /// <summary>
+        /// 初始化组件
+        /// </summary>
+        private void InitializeComponents()
+        {
+            // 初始化设备管理器
+            deviceManager = new AudioDeviceManager();
+            InitializeDevices();
+
+            // 初始化音频播放器
+            audioPlayer = new AudioPlayer();
+            audioPlayer.PositionChanged += AudioPlayer_PositionChanged;
+            audioPlayer.DurationChanged += AudioPlayer_DurationChanged;
+            audioPlayer.PlaybackStarted += AudioPlayer_PlaybackStarted;
+            audioPlayer.PlaybackPaused += AudioPlayer_PlaybackPaused;
+            audioPlayer.PlaybackResumed += AudioPlayer_PlaybackResumed;
+            audioPlayer.PlaybackStopped += AudioPlayer_PlaybackStopped;
+            audioPlayer.VolumeChanged += AudioPlayer_VolumeChanged;
+            audioPlayer.WaveformDataChanged += AudioPlayer_WaveformDataChanged;
+
+            // 初始化音频 recorder
+            audioRecorder = new AudioRecorder();
+            audioRecorder.VolumeChanged += AudioRecorder_VolumeChanged;
+            audioRecorder.WaveformDataChanged += AudioRecorder_WaveformDataChanged;
+            audioRecorder.RecordingStarted += AudioRecorder_RecordingStarted;
+            audioRecorder.RecordingStopped += AudioRecorder_RecordingStopped;
+            audioRecorder.RecordingPaused += AudioRecorder_RecordingPaused;
+            audioRecorder.RecordingResumed += AudioRecorder_RecordingResumed;
         }
 
         // --- 初始化设备 ---
+        /// <summary>
+        /// 初始化录音设备列表
+        /// </summary>
         private void InitializeDevices()
         {
             // 清空列表
             cmbDevices.Items.Clear();
 
             // 添加所有可用的录音设备
-            for (int i = 0; i < WaveIn.DeviceCount; i++)
+            var devices = deviceManager?.GetRecordingDevices();
+            if (devices != null)
             {
-                var caps = WaveIn.GetCapabilities(i);
-                cmbDevices.Items.Add(caps.ProductName);
-            }
+                foreach (var device in devices)
+                {
+                    cmbDevices.Items.Add(device);
+                }
 
-            // 默认选中第一个
-            if (cmbDevices.Items.Count > 0)
-            {
-                cmbDevices.SelectedIndex = 0;
+                // 默认选中第一个
+                if (cmbDevices.Items.Count > 0)
+                {
+                    cmbDevices.SelectedIndex = 0;
+                }
             }
         }
 
-        // 加载已有文件的函数
+        /// <summary>
+        /// 加载已有录音文件
+        /// </summary>
         private void LoadExistingRecordings()
         {
-            // 1. 如果文件夹不存在，就创建一个
-            if (!Directory.Exists(_recordingsFolder))
-            {
-                Directory.CreateDirectory(_recordingsFolder);
-                return; // 刚创建说明是空的，直接返回
-            }
-
-            // 2.先清空列表，防止重复添加
+            // 1.先清空列表，防止重复添加
             lstFiles.Items.Clear();
 
-            // 3. 获取所有 .wav 文件
-            string[] files = Directory.GetFiles(_recordingsFolder, "*.wav");
-
-            // 4. 使用 LINQ 将文件列表倒序排列（最新的在前面）
-            var sortedFiles = files.OrderByDescending(f => f).ToArray();
-
-            // 5. 添加到列表
-            foreach (string file in sortedFiles)
+            // 2. 获取所有录音文件
+            var files = fileService?.FileManager.GetRecordingFiles();
+            if (files != null)
             {
-                string fileName = Path.GetFileName(file);
-                string durationText = "";
-
-                try
+                foreach (var fileInfo in files)
                 {
-                    // 使用 NAudio 读取时长
-                    using (var audioFile = new NAudio.Wave.AudioFileReader(file))
-                    {
-                        // audioFile.TotalTime 是一个 TimeSpan 对象
-                        // ToString(@"mm\:ss") 可以将其格式化为 "分:秒"
-                        durationText = audioFile.TotalTime.ToString(@"mm\:ss");
-                    }
-                }
-                catch
-                {
-                    // 如果读取失败（比如文件损坏），显示 "00:00" 或空
-                    durationText = "00:00";
+                    // 将文件名和时长拼接后添加到列表 效果：2026-04-09-120000.wav [00:05]
+                    lstFiles.Items.Add($"{fileInfo.FileName} [{fileInfo.Duration.ToString(@"mm\:ss")}]");
                 }
 
-                // 将文件名和时长拼接后添加到列表 效果：2026-04-09-120000.wav [00:05]
-                lstFiles.Items.Add($"{fileName} [{durationText}]");
-            }
-
-            // 根据列表是否有内容，决定是否启用播放按钮
-            if (lstFiles.Items.Count > 0)
-            {
-                btnPlay.Enabled = true;//按钮不可用状态
-                btnPausePlay.Enabled = false;//按钮不可用状态
-                btnStopPlay.Enabled = false;//按钮不可用状态
-
-                // 自动选中第一个（最新的）
-                lstFiles.SelectedIndex = 0;
-
-                // 强制手动更新 currentFilePath
-                // 因为初始化时 SelectedIndexChanged 事件可能还没完全生效
-                // 我们直接读取第一行的文本并解析路径
-                string firstItemText = lstFiles.Items[0].ToString();
-                string fileName = "";
-
-                if (firstItemText.Contains(" ["))
+                // 根据列表是否有内容，决定是否启用播放按钮
+                if (lstFiles.Items.Count > 0)
                 {
-                    fileName = firstItemText.Substring(0, firstItemText.IndexOf(" ["));
-                }
+                    btnPlay.Enabled = true;
+                    btnPausePlay.Enabled = false;
+                    btnStopPlay.Enabled = false;
 
-                // 更新全局路径变量
-                currentFilePath = Path.Combine(_recordingsFolder, fileName);
-            }
-            else
-            {
-                currentFilePath = ""; // 没文件就清空
-                btnPlay.Enabled = false;//按钮不可用状态
-                btnPausePlay.Enabled = false;//按钮不可用状态
-                btnStopPlay.Enabled = false;//按钮不可用状态
+                    // 自动选中第一个（最新的）
+                    lstFiles.SelectedIndex = 0;
+
+                    // 强制手动更新 currentFilePath
+                    string firstItemText = lstFiles.Items[0]?.ToString() ?? "";
+                    string fileName = fileService?.ExtractFileNameFromDisplayText(firstItemText) ?? "";
+
+                    // 更新全局路径变量
+                    currentFilePath = fileService?.GetFullPath(fileName) ?? "";
+                }
+                else
+                {
+                    currentFilePath = ""; // 没文件就清空
+                    btnPlay.Enabled = false;
+                    btnPausePlay.Enabled = false;
+                    btnStopPlay.Enabled = false;
+                }
             }
         }
 
-        // 定时器事件：负责平滑地更新界面
-        private void UiTimer_Tick(object sender, EventArgs e)
+        /// <summary>
+        /// 定时器事件：负责平滑地更新界面
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void UiTimer_Tick(object? sender, EventArgs e)
         {
             // 动态调整平滑系数
-            // 如果当前值小于目标值（声音变大），快速跟上 (系数 0.3)
-            // 如果当前值大于目标值（声音变小），缓慢回落 (系数 0.05)，制造“弹回”的效果
-            float speed = (currentValue < targetValue) ? 1.0f : 0.5f;
+            // 如果当前值小于目标值（声音变大），快速跟上 (系数 1.0)
+            // 如果当前值大于目标值（声音变小），快速回落 (系数 0.8)
+            float speed = (currentValue < targetValue) ? 1.0f : 0.8f;
 
             // 简单的线性插值
             currentValue = currentValue + (targetValue - currentValue) * speed;
 
             // 强制安全检查（防止越界崩溃）
-            int val = (int)(currentValue * 20); // 这里的 20 取决于你的 ProgressBar.Maximum
+            int val = (int)(currentValue * 15); // 这里的 15 取决于你的 ProgressBar.Maximum
             if (val < progLevel.Minimum) val = progLevel.Minimum;
             if (val > progLevel.Maximum) val = progLevel.Maximum;
 
@@ -221,286 +277,142 @@ namespace ProAudioRecorder
         }
 
         // --- 录音按钮逻辑 ---
-        private void btnStartPause_Click(object sender, EventArgs e)
+        /// <summary>
+        /// 开始/暂停录音按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnStartPause_Click(object? sender, EventArgs e)
         {
             waveFormControl1.Clear();//清空示波器
 
-            // 情况 A：如果是从“暂停”状态点击的 -> 继续录音
-            if (isPaused)
+            // 检查是否是暂停状态
+            if (audioRecorder != null && audioRecorder.IsPaused)
             {
-                waveIn.DataAvailable += WaveIn_DataAvailable;
-
-                // --- 核心修改：重置开始时间 ---
-                recordingStartTime = DateTime.Now;
-
-                waveIn?.StartRecording(); // 底层继续录音
-                timerRecording.Start();   // 计时器继续走
-
-                waveFormControl1.MaxPoints = 50;
-
-                // UI 更新
-                isPaused = false;
-                isRecording = true; // 恢复录音状态
-                btnStartPause.Text = "暂停录音"; // 按钮变回“暂停”
-                btnStopRec.Enabled = true;
-                btnPauseRec.Enabled = true;
-                cmbDevices.Enabled = false;
-                lblStatus.Text = "正在录音...";
+                // 继续录音
+                audioRecorder.ResumeRecording();
+                recordingTimer.Start();
                 return;
             }
 
-            // 情况 B：如果是全新开始 -> 启动录音
-            if (!isRecording)
+            // 检查是否正在录音
+            if (audioRecorder != null && !audioRecorder.IsRecording)
             {
                 try
                 {
-                    // 1. 准备文件路径
-                    string recordDir = Path.Combine(Application.StartupPath, "Recordings");
-                    if (!Directory.Exists(recordDir)) Directory.CreateDirectory(recordDir);
+                    // 检查是否正在播放，如果是则停止播放
+                    if (audioPlayer != null && audioPlayer.IsPlaying)
+                    {
+                        StopPlayback();
+                    }
 
-                    string fileName = $"{DateTime.Now:yyyy-MM-dd-HHmmss}.wav";
-                    currentFilePath = Path.Combine(recordDir, fileName);
-                    if (File.Exists(currentFilePath)) File.Delete(currentFilePath);
-
-                    // 2. 初始化录音设备
-                    waveIn = new WaveInEvent();
-                    waveIn.DeviceNumber = cmbDevices.SelectedIndex;
-                    waveIn.WaveFormat = new WaveFormat(44100, 16, 1);
-                    waveIn.DataAvailable += WaveIn_DataAvailable;
-                    waveIn.RecordingStopped += WaveIn_RecordingStopped;
-
-                    // 3. 准备写入文件
-                    writer = new WaveFileWriter(currentFilePath, waveIn.WaveFormat);
-
-                    // 4. 开始录音
-                    waveIn.StartRecording();
-                    recordingStartTime = DateTime.Now;
-                    timerRecording.Start();
-
-                    // 5. UI 更新
-                    isRecording = true;
-                    btnStartPause.Text = "暂停录音";
-                    btnStopRec.Enabled = true;
-                    btnPauseRec.Enabled = true;
-                    cmbDevices.Enabled = false;
-                    lblStatus.Text = "正在录音...";
-                    waveFormControl1.Clear();
+                    // 获取选中的设备
+                    if (cmbDevices.SelectedItem is AudioDeviceInfo deviceInfo)
+                    {
+                        // 启动录音
+                        audioRecorder.StartRecording(deviceInfo.DeviceId, _recordingsFolder);
+                        recordingTimer.Start();
+                    }
                 }
                 catch (Exception ex)
                 {
                     MessageBox.Show("录音启动失败: " + ex.Message);
                 }
             }
-            // -------------------------------------------------------
-            // 情况 C：如果是正在录音（且没暂停） -> 触发暂停
-            else if (isRecording && !isPaused)
+            // 如果正在录音（且没暂停） -> 触发暂停
+            else if (audioRecorder != null && audioRecorder.IsRecording && !audioRecorder.IsPaused)
             {
-                // 标记为即将暂停
-                isPaused = true;
-
-                // 调用 StopRecording，这会触发 WaveIn_RecordingStopped 事件
-                // 我们在那里处理真正的 UI 更新和资源挂起
-                waveIn?.StopRecording();
+                // 暂停录音
+                audioRecorder.PauseRecording();
+                recordingTimer.Stop();
             }
         }
 
-        // --- 定时器触发事件（每100毫秒执行一次）更新录音时长 ---
-        private void timerRecording_Tick(object sender, EventArgs e)
+        /// <summary>
+        /// 定时器触发事件（每100毫秒执行一次）更新录音时长
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void RecordingTimer_Tick(object? sender, EventArgs e)
         {
             // 只有在录音中且没有暂停时才更新
-            if (isRecording && !isPaused)
+            if (audioRecorder != null && audioRecorder.IsRecording && !audioRecorder.IsPaused)
             {
-                // 1. 计算从“这次”开始录音到现在过了多久
-                TimeSpan currentSegmentDuration = DateTime.Now - recordingStartTime;
-
-                // 2. 总时长 = 之前积累的时长 + 当前这一段时长
-                TimeSpan totalDuration = totalPausedDuration + currentSegmentDuration;
-
-                // 3. 更新UI
-                lblDuration.Text = totalDuration.ToString(@"hh\:mm\:ss");
-
+                // 更新UI
+                lblDuration.Text = audioRecorder.CurrentDuration.ToString(@"hh\:mm\:ss");
             }
         }
 
-        private void WaveIn_DataAvailable(object sender, WaveInEventArgs e)
+        /// <summary>
+        /// 停止录音按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnStopRec_Click(object? sender, EventArgs e)
         {
-            // 1. 写入文件 (保持不变)
-            writer?.Write(e.Buffer, 0, e.BytesRecorded);
-
-            // 2. 添加数据（只传 2 个参数）
-            waveFormControl1.AddAudioData(e.Buffer, e.BytesRecorded);
-
-            // 3. 计算音量峰值 (保持不变)
-            float max = 0;
-            for (int i = 0; i < e.BytesRecorded; i += 2)
+            if (audioRecorder != null && (audioRecorder.IsRecording || audioRecorder.IsPaused))
             {
-                short sample = (short)((e.Buffer[i + 1] << 8) | e.Buffer[i]);
-                float val = Math.Abs(sample / 32768f);
-                if (val > max) max = val;
-            }
+                // 停止录音
+                audioRecorder.StopRecording();
+                recordingTimer.Stop();
 
-            // 4. 更新电平条 (保持不变)
-            targetValue = Math.Min(max * 5.0f, 1.0f);
+                // 清空示波器
+                waveFormControl1.Clear();
+            }
         }
 
-        private void WaveIn_RecordingStopped(object? sender, StoppedEventArgs e)
+        /// <summary>
+        /// 暂停录音按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnPauseRec_Click(object? sender, EventArgs e)
         {
-            // --- 情况 A：如果是“暂停”操作触发的 ---
-            if (isPaused)
+            if (audioRecorder != null && audioRecorder.IsRecording && !audioRecorder.IsPaused)
             {
-                // --- 计算暂停前的总时长并保存 ---
-                // 先算出这一段的时长
-                TimeSpan lastSegment = DateTime.Now - recordingStartTime;
-                // 累加到总时长里
-                totalPausedDuration += lastSegment;
-                // 1. 暂停计时器
-                timerRecording.Stop();
-                // 状态重置
-                isRecording = false;
-
-                // 2. 更新 UI (切回“继续”模式)
-                this.Invoke(new Action(() =>
+                try
                 {
-                    btnStartPause.Text = "继续录音"; // 按钮变字
-                    btnStopRec.Enabled = false;      // 禁用停止
-                    btnPauseRec.Enabled = false;     // 禁用暂停
-                    cmbDevices.Enabled = false;      // 依然禁用设备选择
-                    lblStatus.Text = "已暂停";
-                    // --- 新增：强制归零 ---
-                    targetValue = 0;    // 目标设为0
-                    currentValue = 0;   // 当前显示设为0
-                    progLevel.Value = 0; // 立即刷新界面
-
-                    // 注意：这里不要释放 waveIn 和 writer，否则无法继续写文件！
-                }));
-                return; // 直接返回，不要执行后面的释放代码！
-            }
-
-            // --- 情况 B：如果是“停止”操作触发的 (真正的结束) ---
-
-            // 1. 释放资源
-            waveIn?.Dispose();
-            waveIn = null;
-            writer?.Dispose();
-            writer = null;
-
-            // 2. 更新 UI
-            this.Invoke(new Action(() =>
-            {
-                isRecording = false;
-                isPaused = false;
-                totalPausedDuration = TimeSpan.Zero;
-
-                btnStartPause.Text = "开始录音"; // 按钮复位
-                btnStartPause.Enabled = true;
-                btnStopRec.Enabled = false;
-                btnPauseRec.Enabled = false;
-                cmbDevices.Enabled = true;
-                lblStatus.Text = "录音完成";
-                // --- 新增：强制归零 ---
-                targetValue = 0;    // 目标设为0
-                currentValue = 0;   // 当前显示设为0
-                progLevel.Value = 0; // 立即刷新界面
-
-                // 添加文件到列表
-                if (!string.IsNullOrEmpty(currentFilePath))
-                {
-                    LoadExistingRecordings();// 重新加载列表会自动选中最新的录音文件
-                    if (lstFiles.Items.Count > 0)
-                    {
-                        lstFiles.SelectedIndex = 0;// 自动选中最新的录音文件
-                    }
+                    // 暂停录音
+                    audioRecorder.PauseRecording();
+                    recordingTimer.Stop();
                 }
-
-                timerRecording.Stop();// 停止计时器
-                progLevel.Value = 0;//电平条重置
-                lblDuration.Text = "00:00:00";//时长标签重置
-            }));
-        }
-
-        private void btnStopRec_Click(object sender, EventArgs e)
-        {
-            if (!isRecording) return;
-
-            // 如果是暂停状态点击停止，我们需要先标记为“不是暂停”，告诉系统这是真的停止
-            isPaused = false;
-            waveIn?.StopRecording(); // 触发 RecordingStopped
-
-            // 清空示波器
-            waveFormControl1.Clear();
-        }
-
-        private void btnPauseRec_Click(object sender, EventArgs e)
-        {
-            if (!isRecording || isPaused) return;
-
-            try
-            {
-                // 1. 底层暂停（注意：WaveInEvent 的 Pause 方法只是暂停回调，文件流还是开着的）
-                waveIn?.StopRecording(); 
-                // 注意：NAudio 的 WaveInEvent 其实没有真正的 Pause，通常是用 StopRecording 模拟，但为了不触发 RecordingStopped，我们需要特殊处理，或者直接用 StopRecording 并在逻辑里判断。
-                // 修正：WaveInEvent 实际上没有 Pause 方法，只有 Start 和 Stop。
-                // 为了模拟暂停，我们调用 StopRecording，但在 RecordingStopped 事件里要判断是不是“暂停”。
-                // 但更简单的做法是：直接停止数据回调，但保持文件流打开。
-                // 这里我们沿用 StopRecording，配合 isPaused 标志位。
-
-                // 实际上，WaveInEvent.StopRecording() 会触发 RecordingStopped。
-                // 为了不把事情搞复杂，我们这里直接用 .Pause() 如果有的话，或者仅仅停止数据写入。
-                // 既然 NAudio 的 WaveInEvent 比较底层，我们这里采用“逻辑暂停”：
-                // 我们不调用 waveIn.StopRecording()，而是直接暂停定时器和更新 UI。
-                // 但为了真正停止占用麦克风，最好还是调用 StopRecording。
-
-                // --- 最佳实践方案 ---
-                // 我们调用 waveIn.StopRecording()。这会触发 RecordingStopped。
-                // 我们需要在 RecordingStopped 里判断 isPaused。
-
-                isPaused = true; // 标记即将暂停
-                waveIn?.StopRecording(); // 这会触发下面的 RecordingStopped 事件
-
-                // 注意：UI 更新将在 RecordingStopped 事件里统一处理，以防状态不同步
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("暂停出错: " + ex.Message);
+                catch (Exception ex)
+                {
+                    MessageBox.Show("暂停出错: " + ex.Message);
+                }
             }
         }
 
         // --- 播放按钮逻辑 ---
 
-        private void btnPlay_Click(object sender, EventArgs e)
+        /// <summary>
+        /// 播放按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnPlay_Click(object? sender, EventArgs e)
         {
             StartPlayback();
         }
 
-        // 进度更新计时器事件
-        private void ProgressTimer_Tick(object sender, EventArgs e)
+        /// <summary>
+        /// 进度更新计时器事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void ProgressTimer_Tick(object? sender, EventArgs e)
         {
-            // 1. 确保音频文件存在且已初始化
-            if (audioFile == null) return;
+            // 1. 确保音频播放器存在且已初始化
+            if (audioPlayer == null)
+                return;
 
             // 2. 只有当用户没在拖动时，才更新进度条
             if (!isUserDragging)
             {
                 try
                 {
-                    // 获取当前播放时间（秒）
-                    double currentTimeSeconds = audioFile.CurrentTime.TotalSeconds;
-
-                    // 确保进度条的最大值足够大 (防御性编程)
-                    if (trackProgress.Maximum < totalDuration)
-                    {
-                        trackProgress.Maximum = (int)totalDuration;
-                    }
-
-                    // 更新进度条 (注意：确保 currentTime 不超过 Maximum)
-                    int currentVal = (int)currentTimeSeconds;
-                    if (currentVal <= trackProgress.Maximum)
-                    {
-                        trackProgress.Value = currentVal;
-                    }
-
-                    // 更新时间标签
-                    UpdateTimeLabel(currentTimeSeconds, totalDuration);
+                    // 更新播放器位置
+                    audioPlayer.UpdatePosition();
                 }
                 catch (Exception ex)
                 {
@@ -509,97 +421,86 @@ namespace ProAudioRecorder
             }
         }
 
-        // 用户拖动或点击进度条时触发
-        private void trackProgress_Scroll(object sender, EventArgs e)
+        /// <summary>
+        /// 用户拖动或点击进度条时触发
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trackProgress_Scroll(object? sender, EventArgs e)
         {
             // 如果用户正在拖动，才执行跳转
-            if (isUserDragging && audioFile != null)
+            if (isUserDragging && audioPlayer != null)
             {
-                audioFile.CurrentTime = TimeSpan.FromSeconds(trackProgress.Value); // 1. 跳转音频
-
-                UpdateTimeLabel(trackProgress.Value, totalDuration);// 2.主动更新时间标签
+                audioPlayer.Seek(TimeSpan.FromSeconds(trackProgress.Value)); // 1. 跳转音频
             }
         }
 
-        // 2. 添加 MouseDown 事件（用户按下鼠标）
-        private void trackProgress_MouseDown(object sender, MouseEventArgs e)
+        /// <summary>
+        /// 进度条鼠标按下事件（用户按下鼠标）
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trackProgress_MouseDown(object? sender, MouseEventArgs e)
         {
             isUserDragging = true;
         }
 
-        // 3. 添加 MouseUp 事件（用户松开鼠标）
-        private void trackProgress_MouseUp(object sender, MouseEventArgs e)
+        /// <summary>
+        /// 进度条鼠标松开事件（用户松开鼠标）
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trackProgress_MouseUp(object? sender, MouseEventArgs e)
         {
             isUserDragging = false;
             // 松开后立即跳转一次，确保精准
-            if (audioFile != null)
+            if (audioPlayer != null)
             {
-                audioFile.CurrentTime = TimeSpan.FromSeconds(trackProgress.Value);
+                audioPlayer.Seek(TimeSpan.FromSeconds(trackProgress.Value));
             }
-        }
-
-        // 播放结束事件
-        private void WaveOut_PlaybackStopped(object sender, StoppedEventArgs e)
-        {
-            StopAndReset();
         }
 
         /// <summary>
-        /// 更新时间标签的显示格式：mm:ss / mm:ss
+        /// 核心音频文件播放方法
         /// </summary>
-        private void UpdateTimeLabel(double current, double total)
-        {
-            // 将秒数转换为 TimeSpan 以便格式化
-            TimeSpan currentTimeSpan = TimeSpan.FromSeconds(current);
-            TimeSpan totalTimeSpan = TimeSpan.FromSeconds(total);
-
-            // 格式化为 "mm:ss"
-            // 如果小时数大于0，可以改为 hh\:mm\:ss
-            string currentStr = currentTimeSpan.ToString(@"mm\:ss");
-            string totalStr = totalTimeSpan.ToString(@"mm\:ss");
-
-            lblTime.Text = $"{currentStr} / {totalStr}";
-        }
-
-        // 核心音频文件播放方法
         private void StartPlayback()
         {
-            if (isPlaying)
-            {
-                StopAndReset();
-            }
+            if (audioPlayer == null)
+                return;
 
             // 额外保险：防止文件路径为空
-            if (string.IsNullOrEmpty(currentFilePath)) return;
+            if (string.IsNullOrEmpty(currentFilePath))
+                return;
 
-            if (!File.Exists(currentFilePath))
+            if (!fileService?.FileExists(currentFilePath) ?? true)
             {
-                MessageBox.Show("请先选中需要播放的音频文件！");
+                MessageBox.Show("请先选中需要播放的音频文件！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             try
             {
-                // 1. 准备播放
-                audioFile = new AudioFileReader(currentFilePath);
-                totalDuration = audioFile.TotalTime.TotalSeconds;//获取总时长
-                UpdateTimeLabel(0, totalDuration);// 获取总时长 
-                waveOut = new WaveOutEvent();
-                waveOut.Init(audioFile);
+                // 检查是否正在录音，如果是则停止录音
+                if (audioRecorder != null && (audioRecorder.IsRecording || audioRecorder.IsPaused))
+                {
+                    audioRecorder.StopRecording();
+                    recordingTimer.Stop();
+                }
 
+                // 1. 加载文件
+                audioPlayer.LoadFile(currentFilePath);
 
                 // 2.设置进度条
-                trackProgress.Maximum = (int)audioFile.TotalTime.TotalSeconds;
-                trackProgress.Value = 0; // 归零
+                trackProgress.Maximum = (int)audioPlayer.TotalDuration.TotalSeconds;
+                trackProgress.Value = 0;
 
                 // 3. 开始播放
-                waveOut.PlaybackStopped += WaveOut_PlaybackStopped;
-                waveOut.Play();
+                audioPlayer.Play();
 
                 // 4. 启动计时器
                 progressTimer.Start();
 
-                isPlaying = true;
+                // 5. 更新UI
                 btnPlay.Enabled = false;
                 btnPausePlay.Enabled = true;
                 btnStopPlay.Enabled = true;
@@ -608,195 +509,178 @@ namespace ProAudioRecorder
             }
             catch (Exception ex)
             {
-                MessageBox.Show("播放失败: " + ex.Message);
+                MessageBox.Show("播放失败: " + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        private void StopAndReset()
+        /// <summary>
+        /// 停止播放
+        /// </summary>
+        private void StopPlayback()
         {
-            // 2. 停止计时器
             progressTimer?.Stop();
 
-            // 3. 重置进度条
             trackProgress.Value = 0;
-
-            // 重置标签
             lblTime.Text = "00:00 / 00:00";
-            totalDuration = 0;
 
-            // 重置音量控件状态
             trackVolume.Value = 100;
             chkMute.Checked = false;
             if (trackVolume.Enabled == false) trackVolume.Enabled = true;
 
-            // 1. 停止播放
-            if (waveOut != null)
+            targetValue = 0;
+            currentValue = 0;
+            progLevel.Value = 0;
+
+            if (audioPlayer != null)
             {
-                // 1. 先解绑播放结束事件 防止旧事件干扰
-                waveOut.PlaybackStopped -= WaveOut_PlaybackStopped;
-                try
-                {
-                    waveOut.Stop();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("停止播放出错: " + ex.Message);
-                }
-                waveOut.Dispose();
-                waveOut = null;
+                audioPlayer.Stop();
             }
 
-            if (audioFile != null)
-            {
-                try { audioFile.Dispose(); } catch { }
-                audioFile = null;
-            }
-
-            // 给系统一点点释放时间（可选，视情况而定）
-            System.Threading.Thread.Sleep(50);
-
-            // 5. 更新状态
-            isPlaying = false;
             lblStatus.Text = "已停止";
             btnPlay.Enabled = true;
             btnPausePlay.Enabled = false;
             btnStopPlay.Enabled = false;
         }
 
-        // 暂停/继续 按钮
-        private void btnPausePlay_Click(object sender, EventArgs e)
+        /// <summary>
+        /// 暂停/继续按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnPausePlay_Click(object? sender, EventArgs e)
         {
-            if (waveOut == null) return;
+            if (audioPlayer == null)
+                return;
 
-            // 判断当前状态：如果是播放中，则暂停；如果是暂停中，则继续
-            if (waveOut.PlaybackState == PlaybackState.Playing)
+            // 判断当前状态：如果是暂停中，则继续；否则暂停
+            if (audioPlayer.IsPaused)
             {
-                waveOut.Pause();
-                lblStatus.Text = "播放已暂停";
-                btnPausePlay.Text = "继续播放"; // 修改按钮文字提示用户
-            }
-            else if (waveOut.PlaybackState == PlaybackState.Paused)
-            {
-                waveOut.Play();
-                lblStatus.Text = "正在播放...";
-                btnPausePlay.Text = "暂停播放"; // 恢复按钮文字
-            }
-        }
-
-        // 停止按钮
-        private void btnStopPlay_Click(object sender, EventArgs e)
-        {
-            StopAndReset();// 直接调用之前写好的彻底清理方法
-        }
-
-        // --- 双击文件列表文件事件 触发播放音频文件 ---
-        private void lstFiles_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            // 1. 如果没有选中任何项，直接返回
-            if (lstFiles.SelectedIndex == -1) return;
-
-            // 2. 获取选中的文本
-            string selectedText = lstFiles.SelectedItem.ToString();
-
-            // 3. 提取纯文件名
-            string fileName = "";
-            if (selectedText.Contains(" ["))
-            {
-                fileName = selectedText.Substring(0, selectedText.IndexOf(" ["));
+                audioPlayer.Resume();
             }
             else
             {
-                fileName = selectedText;
+                audioPlayer.Pause();
             }
-
-            // 4. 拼接完整路径
-            currentFilePath = Path.Combine(_recordingsFolder, fileName);
         }
 
-        // --- 文件列表按键删除处理事件（可能无效） ---
+        /// <summary>
+        /// 停止按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnStopPlay_Click(object? sender, EventArgs e)
+        {
+            StopPlayback();// 直接调用之前写好的彻底清理方法
+        }
+
+        /// <summary>
+        /// 文件列表选中项改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void lstFiles_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            // 1. 如果没有选中任何项，直接返回
+            if (lstFiles.SelectedIndex == -1 || lstFiles.SelectedItem == null) return;
+
+            // 2. 获取选中的文本
+            string selectedText = lstFiles.SelectedItem.ToString() ?? "";
+
+            // 3. 提取纯文件名
+            string fileName = fileService?.ExtractFileNameFromDisplayText(selectedText) ?? "";
+
+            // 4. 拼接完整路径
+            currentFilePath = fileService?.GetFullPath(fileName) ?? "";
+        }
+
+        // --- 文件删除相关方法 ---
+        /// <summary>
+        /// 文件列表键盘按下事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
         private void lstFiles_KeyDown(object? sender, KeyEventArgs e)
         {
             // 如果按下了 Delete 键，且列表里有选中项
             if (e.KeyCode == Keys.Delete && lstFiles.SelectedItem != null)
             {
-                string fileName = lstFiles.SelectedItem.ToString();
+                DeleteSelectedFile();
+            }
+        }
 
-                // 二次确认
-                DialogResult result = MessageBox.Show(
-                    $"确定要删除文件 \"{fileName}\" 吗？",
-                    "确认删除",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning);
+        /// <summary>
+        /// 删除按钮点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void btnDelete_Click(object? sender, EventArgs e)
+        {
+            DeleteSelectedFile();
+        }
 
-                if (result == DialogResult.Yes)
+        /// <summary>
+        /// 删除选中的文件
+        /// </summary>
+        private void DeleteSelectedFile()
+        {
+            // 检查是否正在执行删除操作
+            if (isDeleting)
+                return;
+                
+            // 标记为正在执行删除操作
+            isDeleting = true;
+            
+            try
+            {
+                // 禁用所有相关控件，防止用户操作
+                btnDelete.Enabled = false;
+                lstFiles.Enabled = false;
+                
+                // 1. 检查有没有选中任何文件
+                if (lstFiles.SelectedItem == null)
+                {
+                    MessageBox.Show("请先在列表中选择一个要删除的文件！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                // 2. 获取列表显示的完整文本
+                string fullText = lstFiles.SelectedItem.ToString() ?? "";
+
+                // 3. 提取真正的文件名
+                string fileName = fileService?.ExtractFileNameFromDisplayText(fullText) ?? "";
+
+                // 4. 二次确认
+                if (MessageBox.Show($"确定要删除文件 \"{fileName}\" 吗？", "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 {
                     try
                     {
-                        // 1. 获取完整路径
-                        string recordDir = Path.Combine(Application.StartupPath, "Recordings");
-                        string pathToDelete = Path.Combine(recordDir, fileName);
-
-                        // 2. 删除文件
-                        if (File.Exists(pathToDelete))
-                        {
-                            File.Delete(pathToDelete);
-                        }
-
-                        // 3. 从列表中移除
-                        lstFiles.Items.Remove(lstFiles.SelectedItem);
+                        fileService?.DeleteFile(fileName);
+                        
+                        // 延迟重新加载文件列表，确保所有事件处理完毕
+                        System.Threading.Thread.Sleep(100);
+                        LoadExistingRecordings();
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show("删除失败: " + ex.Message);
+                        MessageBox.Show("删除失败: " + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
             }
-        }
-
-        // 删除按钮事件 删除选中的文件
-        private void btnDelete_Click(object sender, EventArgs e)
-        {
-            // 1. 检查有没有选中任何文件
-            if (lstFiles.SelectedItem == null)
+            finally
             {
-                MessageBox.Show("请先在列表中选择一个要删除的文件！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return; // 直接退出，不执行后面的代码
-            }
-
-            // 1. 获取列表显示的完整文本
-            string fullText = lstFiles.SelectedItem.ToString();
-
-            // 2. 提取真正的文件名
-            string fileName = fullText.Split(new string[] { " [" }, StringSplitOptions.None)[0];
-
-            // 3. 二次确认
-            DialogResult result = MessageBox.Show($"确定要删除文件 \"{fileName}\" 吗？", "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-
-            if (result == DialogResult.Yes)
-            {
-                try
-                {
-                    // 4. 拼接完整路径
-                    string recordDir = Path.Combine(Application.StartupPath, "Recordings");
-                    string pathToDelete = Path.Combine(recordDir, fileName);
-
-                    // 5. 执行删除
-                    if (File.Exists(pathToDelete))
-                    {
-                        File.Delete(pathToDelete);
-                    }
-
-                    // 6. 从列表移除
-                    lstFiles.Items.Remove(lstFiles.SelectedItem);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("删除失败: " + ex.Message);
-                }
+                // 无论操作成功与否，都重新启用所有相关控件并重置标志
+                btnDelete.Enabled = true;
+                lstFiles.Enabled = true;
+                isDeleting = false;
             }
         }
 
-        private void lstFiles_MouseDoubleClick(object sender, MouseEventArgs e)
+        /// <summary>
+        /// 文件列表双击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void lstFiles_MouseDoubleClick(object? sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
@@ -804,14 +688,18 @@ namespace ProAudioRecorder
             }
         }
 
-        //音量条滚动事件
-        private void trackVolume_Scroll(object sender, EventArgs e)
+        /// <summary>
+        /// 音量条滚动事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trackVolume_Scroll(object? sender, EventArgs e)
         {
-            if (audioFile != null)
+            if (audioPlayer != null)
             {
                 // TrackBar 的值是 0-100，AudioFileReader.Volume 需要 0.0-1.0
                 float volume = trackVolume.Value / 100.0f;
-                audioFile.Volume = volume;
+                audioPlayer.Volume = volume;
 
                 // 如果用户手动调节了音量，自动取消静音
                 if (chkMute.Checked)
@@ -821,29 +709,307 @@ namespace ProAudioRecorder
             }
         }
 
-        //静音复选框事件
-        private void chkMute_CheckedChanged(object sender, EventArgs e)
+        /// <summary>
+        /// 静音复选框事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void chkMute_CheckedChanged(object? sender, EventArgs e)
         {
-            if (audioFile != null)
+            if (audioPlayer != null)
             {
-                if (chkMute.Checked)
-                {
-                    // 静音：保存当前音量，然后设为 0
-                    previousVolume = audioFile.Volume;
-                    audioFile.Volume = 0.0f;
+                audioPlayer.Mute(chkMute.Checked);
 
-                    // 可选：把音量条变灰，表示不可用
-                    trackVolume.Enabled = false;
+                // 可选：把音量条变灰，表示不可用
+                trackVolume.Enabled = !chkMute.Checked;
+            }
+        }
+
+        // --- 事件处理方法 ---
+
+        /// <summary>
+        /// 录音音量改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="volume">音量值</param>
+        private void AudioRecorder_VolumeChanged(object? sender, float volume)
+        {
+            // 使用 BeginInvoke 异步更新变量，避免阻塞主线程
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<float>((vol) => {
+                    targetValue = vol;
+                }), volume);
+            }
+            else
+            {
+                targetValue = volume;
+            }
+        }
+
+        /// <summary>
+        /// 录音波形数据改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="waveformData">波形数据</param>
+        private void AudioRecorder_WaveformDataChanged(object? sender, float waveformData)
+        {
+            if (waveFormControl1 != null && audioRecorder != null && audioRecorder.IsRecording)
+            {
+                // 使用 BeginInvoke 异步更新 UI，避免阻塞主线程
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action<float>((data) => {
+                        if (waveFormControl1 != null && audioRecorder != null && audioRecorder.IsRecording)
+                        {
+                            waveFormControl1.AddValue(data);
+                        }
+                    }), waveformData);
                 }
                 else
                 {
-                    // 取消静音：恢复之前的音量
-                    audioFile.Volume = previousVolume;
-
-                    // 可选：恢复音量条可用
-                    trackVolume.Enabled = true;
+                    waveFormControl1.AddValue(waveformData);
                 }
             }
         }
+
+        /// <summary>
+        /// 播放音量改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="volume">音量值</param>
+        private void AudioPlayer_VolumeChanged(object? sender, float volume)
+        {
+            if (audioPlayer != null && audioPlayer.IsPlaying)
+            {
+                // 使用 BeginInvoke 异步更新变量，避免阻塞主线程
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action<float>((vol) => {
+                        if (audioPlayer != null && audioPlayer.IsPlaying)
+                        {
+                            targetValue = vol;
+                        }
+                    }), volume);
+                }
+                else
+                {
+                    targetValue = volume;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 播放波形数据改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="waveformData">波形数据</param>
+        private void AudioPlayer_WaveformDataChanged(object? sender, float waveformData)
+        {
+            if (waveFormControl1 != null && audioPlayer != null && audioPlayer.IsPlaying)
+            {
+                // 使用 BeginInvoke 异步更新 UI，避免阻塞主线程
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action<float>((data) => {
+                        if (waveFormControl1 != null && audioPlayer != null && audioPlayer.IsPlaying)
+                        {
+                            waveFormControl1.AddValue(data);
+                        }
+                    }), waveformData);
+                }
+                else
+                {
+                    waveFormControl1.AddValue(waveformData);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 录音开始事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioRecorder_RecordingStarted(object? sender, EventArgs e)
+        {
+            // UI 更新
+            btnStartPause.Text = "暂停录音";
+            btnStopRec.Enabled = true;
+            btnPauseRec.Enabled = true;
+            cmbDevices.Enabled = false;
+            lblStatus.Text = "正在录音...";
+            waveFormControl1.Clear();
+        }
+
+        /// <summary>
+        /// 录音停止事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioRecorder_RecordingStopped(object? sender, EventArgs e)
+        {
+            // UI 更新
+            btnStartPause.Text = "开始录音";
+            btnStartPause.Enabled = true;
+            btnStopRec.Enabled = false;
+            btnPauseRec.Enabled = false;
+            cmbDevices.Enabled = true;
+            lblStatus.Text = "录音完成";
+            
+            // 强制归零
+            targetValue = 0;
+            currentValue = 0;
+            progLevel.Value = 0;
+            
+            // 清空波形
+            waveFormControl1.Clear();
+
+            // 重新加载文件列表
+            LoadExistingRecordings();
+
+            // 重置标签
+            lblDuration.Text = "00:00:00";
+        }
+
+        /// <summary>
+        /// 录音暂停事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioRecorder_RecordingPaused(object? sender, EventArgs e)
+        {
+            // UI 更新
+            btnStartPause.Text = "继续录音";
+            btnStopRec.Enabled = false;
+            btnPauseRec.Enabled = false;
+            cmbDevices.Enabled = false;
+            lblStatus.Text = "已暂停";
+            
+            // 强制归零
+            targetValue = 0;
+            currentValue = 0;
+            progLevel.Value = 0;
+        }
+
+        /// <summary>
+        /// 录音恢复事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioRecorder_RecordingResumed(object? sender, EventArgs e)
+        {
+            // UI 更新
+            btnStartPause.Text = "暂停录音";
+            btnStopRec.Enabled = true;
+            btnPauseRec.Enabled = true;
+            cmbDevices.Enabled = false;
+            lblStatus.Text = "正在录音...";
+        }
+
+        /// <summary>
+        /// 更新时间标签的显示格式：mm:ss / mm:ss
+        /// </summary>
+        /// <param name="current">当前时间</param>
+        /// <param name="total">总时间</param>
+        private void UpdateTimeLabel(TimeSpan current, TimeSpan total)
+        {
+            // 格式化为 "mm:ss"
+            string currentStr = current.ToString(@"mm\:ss");
+            string totalStr = total.ToString(@"mm\:ss");
+
+            lblTime.Text = $"{currentStr} / {totalStr}";
+        }
+
+        /// <summary>
+        /// 播放位置改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="position">当前位置</param>
+        private void AudioPlayer_PositionChanged(object? sender, TimeSpan position)
+        {
+            // 只有当用户没在拖动时，才更新进度条
+            if (!isUserDragging)
+            {
+                int currentVal = (int)position.TotalSeconds;
+                if (currentVal <= trackProgress.Maximum)
+                {
+                    trackProgress.Value = currentVal;
+                }
+
+                // 更新时间标签
+                UpdateTimeLabel(position, audioPlayer?.TotalDuration ?? TimeSpan.Zero);
+            }
+        }
+
+        /// <summary>
+        /// 播放时长改变事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="duration">总时长</param>
+        private void AudioPlayer_DurationChanged(object? sender, TimeSpan duration)
+        {
+            // 更新进度条最大值
+            trackProgress.Maximum = (int)duration.TotalSeconds;
+            // 更新时间标签
+            UpdateTimeLabel(TimeSpan.Zero, duration);
+        }
+
+        /// <summary>
+        /// 播放开始事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioPlayer_PlaybackStarted(object? sender, EventArgs e)
+        {
+            waveFormControl1.MaxPoints = 150;
+            waveFormControl1.Clear();
+            lblStatus.Text = "正在播放...";
+            btnPausePlay.Text = "暂停播放";
+        }
+
+        /// <summary>
+        /// 播放暂停事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioPlayer_PlaybackPaused(object? sender, EventArgs e)
+        {
+            lblStatus.Text = "播放已暂停";
+            btnPausePlay.Text = "继续播放";
+        }
+
+        /// <summary>
+        /// 播放恢复事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioPlayer_PlaybackResumed(object? sender, EventArgs e)
+        {
+            lblStatus.Text = "正在播放...";
+            btnPausePlay.Text = "暂停播放";
+        }
+
+        /// <summary>
+        /// 播放停止事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void AudioPlayer_PlaybackStopped(object? sender, EventArgs e)
+        {
+            waveFormControl1.MaxPoints = 3000;
+            waveFormControl1.Clear();
+            StopPlayback();
+        }
+
+        /// <summary>
+        /// 更新录音按钮状态
+        /// </summary>
+        private void UpdateRecordingButtonStates()
+        {
+            btnStartPause.Enabled = true;
+            btnStopRec.Enabled = false;
+            btnPauseRec.Enabled = false;
+        }
+
     }
 }
