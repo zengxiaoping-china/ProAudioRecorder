@@ -69,6 +69,38 @@ namespace ProAudioRecorder
         /// 标记是否正在执行删除操作
         /// </summary>
         private bool isDeleting = false;
+        /// <summary>
+        /// 文件列表右键菜单
+        /// </summary>
+        private ContextMenuStrip? fileContextMenu;
+        
+        /// <summary>
+        /// 播放模式枚举
+        /// </summary>
+        private enum PlaybackMode
+        {
+            /// <summary>
+            /// 播完停止
+            /// </summary>
+            StopWhenFinished,
+            /// <summary>
+            /// 单曲循环
+            /// </summary>
+            SingleLoop,
+            /// <summary>
+            /// 顺序播放
+            /// </summary>
+            Sequential
+        }
+        
+        /// <summary>
+        /// 当前播放模式
+        /// </summary>
+        private PlaybackMode currentPlaybackMode = PlaybackMode.StopWhenFinished;
+        /// <summary>
+        /// 标记是否是用户主动停止播放
+        /// </summary>
+        private bool isUserStopping = false;
 
         /// <summary>
         /// 构造函数
@@ -98,6 +130,9 @@ namespace ProAudioRecorder
             // 初始化定时器
             InitializeTimers();
 
+            // 初始化右键菜单
+            InitializeContextMenu();
+
             //初始化录音按键
             UpdateRecordingButtonStates();
         }
@@ -120,6 +155,7 @@ namespace ProAudioRecorder
             // 3. 绑定文件事件
             lstFiles.SelectedIndexChanged += lstFiles_SelectedIndexChanged;
             lstFiles.MouseDoubleClick += lstFiles_MouseDoubleClick;
+            lstFiles.MouseDown += lstFiles_MouseDown;
             lstFiles.KeyDown += lstFiles_KeyDown;
             btnDelete.Click += btnDelete_Click;
 
@@ -153,6 +189,36 @@ namespace ProAudioRecorder
         }
 
         /// <summary>
+        /// 初始化右键菜单
+        /// </summary>
+        private void InitializeContextMenu()
+        {
+            // 创建右键菜单
+            fileContextMenu = new ContextMenuStrip();
+            
+            // 添加播放录音菜单项
+            ToolStripMenuItem playMenuItem = new ToolStripMenuItem("播放录音");
+            playMenuItem.Click += PlayMenuItem_Click;
+            fileContextMenu.Items.Add(playMenuItem);
+            
+            // 添加删除录音菜单项
+            ToolStripMenuItem deleteMenuItem = new ToolStripMenuItem("删除录音");
+            deleteMenuItem.Click += DeleteMenuItem_Click;
+            fileContextMenu.Items.Add(deleteMenuItem);
+            
+            // 添加分隔线
+            fileContextMenu.Items.Add(new ToolStripSeparator());
+            
+            // 添加从文件夹打开菜单项
+            ToolStripMenuItem openFolderMenuItem = new ToolStripMenuItem("从文件夹打开");
+            openFolderMenuItem.Click += OpenFolderMenuItem_Click;
+            fileContextMenu.Items.Add(openFolderMenuItem);
+            
+            // 为文件列表设置右键菜单
+            lstFiles.ContextMenuStrip = fileContextMenu;
+        }
+
+        /// <summary>
         /// 初始化组件
         /// </summary>
         private void InitializeComponents()
@@ -180,6 +246,42 @@ namespace ProAudioRecorder
             audioRecorder.RecordingStopped += AudioRecorder_RecordingStopped;
             audioRecorder.RecordingPaused += AudioRecorder_RecordingPaused;
             audioRecorder.RecordingResumed += AudioRecorder_RecordingResumed;
+            
+            // 初始化播放模式选择
+            InitializePlaybackMode();
+        }
+        
+        /// <summary>
+        /// 初始化播放模式选择
+        /// </summary>
+        private void InitializePlaybackMode()
+        {
+            // 播放音频按钮位置: (12, 362), 大小: (75, 23)
+            // 播放模式控件应该放在播放音频按钮的右边，水平对齐
+            
+            // 创建播放模式选择ComboBox
+            ComboBox cmbPlaybackMode = new ComboBox();
+            cmbPlaybackMode.Name = "cmbPlaybackMode";
+            // X坐标: 播放按钮X(12) + 播放按钮宽度(75) + 间距(8) = 95
+            // Y坐标: 播放按钮Y(362)，与播放按钮水平对齐
+            cmbPlaybackMode.Location = new Point(95, 362);
+            // 大小与播放音频按钮一样: (75, 23)
+            cmbPlaybackMode.Size = new Size(75, 23);
+            cmbPlaybackMode.DropDownStyle = ComboBoxStyle.DropDownList;
+            
+            // 添加播放模式选项
+            cmbPlaybackMode.Items.Add("播完停止");
+            cmbPlaybackMode.Items.Add("单曲循环");
+            cmbPlaybackMode.Items.Add("顺序播放");
+            
+            // 默认选中播完停止
+            cmbPlaybackMode.SelectedIndex = 0;
+            
+            // 绑定事件
+            cmbPlaybackMode.SelectedIndexChanged += cmbPlaybackMode_SelectedIndexChanged;
+            
+            // 添加到表单
+            this.Controls.Add(cmbPlaybackMode);
         }
 
         // --- 初始化设备 ---
@@ -533,10 +635,13 @@ namespace ProAudioRecorder
 
             if (audioPlayer != null)
             {
+                // 标记为用户主动停止
+                isUserStopping = true;
                 audioPlayer.Stop();
             }
 
             lblStatus.Text = "已停止";
+
             btnPlay.Enabled = true;
             btnPausePlay.Enabled = false;
             btnStopPlay.Enabled = false;
@@ -649,7 +754,10 @@ namespace ProAudioRecorder
                 // 3. 提取真正的文件名
                 string fileName = fileService?.ExtractFileNameFromDisplayText(fullText) ?? "";
 
-                // 4. 二次确认
+                // 4. 记录当前选中文件的索引
+                int deletedIndex = lstFiles.SelectedIndex;
+                
+                // 5. 二次确认
                 if (MessageBox.Show($"确定要删除文件 \"{fileName}\" 吗？", "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 {
                     try
@@ -659,6 +767,26 @@ namespace ProAudioRecorder
                         // 延迟重新加载文件列表，确保所有事件处理完毕
                         System.Threading.Thread.Sleep(100);
                         LoadExistingRecordings();
+                        
+                        // 删除后选中下一个文件
+                        if (lstFiles.Items.Count > 0)
+                        {
+                            // 如果删除的文件下面还有文件，选中该索引位置的文件
+                            if (deletedIndex < lstFiles.Items.Count)
+                            {
+                                lstFiles.SelectedIndex = deletedIndex;
+                            }
+                            else
+                            {
+                                // 如果删除的文件下面没有文件了，选中最新文件（索引0）
+                                lstFiles.SelectedIndex = 0;
+                            }
+                            
+                            // 更新 currentFilePath
+                            string selectedText = lstFiles.SelectedItem?.ToString() ?? "";
+                            string selectedFileName = fileService?.ExtractFileNameFromDisplayText(selectedText) ?? "";
+                            currentFilePath = fileService?.GetFullPath(selectedFileName) ?? "";
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -998,7 +1126,71 @@ namespace ProAudioRecorder
         {
             waveFormControl1.MaxPoints = 3000;
             waveFormControl1.Clear();
-            StopPlayback();
+            
+            // 检查是否是用户主动停止
+            if (isUserStopping)
+            {
+                // 重置标志
+                isUserStopping = false;
+                // 不执行播放模式逻辑
+                return;
+            }
+            
+            // 根据播放模式执行不同操作
+            switch (currentPlaybackMode)
+            {
+                case PlaybackMode.StopWhenFinished:
+                    // 播完停止
+                    StopPlayback();
+                    break;
+                case PlaybackMode.SingleLoop:
+                    // 单曲循环
+                    // 延迟一下，避免播放停止后立即重新开始导致的问题
+                    System.Threading.Thread.Sleep(100);
+                    StartPlayback();
+                    break;
+                case PlaybackMode.Sequential:
+                    // 顺序播放
+                    PlayNextFile();
+                    break;
+            }
+        }
+        
+        /// <summary>
+        /// 播放下一个文件
+        /// </summary>
+        private void PlayNextFile()
+        {
+            if (lstFiles.Items.Count > 0)
+            {
+                int currentIndex = lstFiles.SelectedIndex;
+                int nextIndex = currentIndex + 1;
+                
+                // 如果不是最后一个文件，播放下一个
+                if (nextIndex < lstFiles.Items.Count)
+                {
+                    lstFiles.SelectedIndex = nextIndex;
+                    
+                    // 更新 currentFilePath
+                    string selectedText = lstFiles.SelectedItem?.ToString() ?? "";
+                    string selectedFileName = fileService?.ExtractFileNameFromDisplayText(selectedText) ?? "";
+                    currentFilePath = fileService?.GetFullPath(selectedFileName) ?? "";
+                    
+                    // 延迟一下，确保文件路径更新完成
+                    System.Threading.Thread.Sleep(100);
+                    StartPlayback();
+                }
+                else
+                {
+                    // 已经是最后一个文件，停止播放
+                    StopPlayback();
+                }
+            }
+            else
+            {
+                // 文件列表为空，停止播放
+                StopPlayback();
+            }
         }
 
         /// <summary>
@@ -1009,6 +1201,98 @@ namespace ProAudioRecorder
             btnStartPause.Enabled = true;
             btnStopRec.Enabled = false;
             btnPauseRec.Enabled = false;
+        }
+
+        // --- 右键菜单事件处理 ---        
+        /// <summary>
+        /// 播放录音菜单项点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void PlayMenuItem_Click(object? sender, EventArgs e)
+        {
+            StartPlayback();
+        }
+
+        /// <summary>
+        /// 删除录音菜单项点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void DeleteMenuItem_Click(object? sender, EventArgs e)
+        {
+            DeleteSelectedFile();
+        }
+
+        /// <summary>
+        /// 文件列表鼠标按下事件，用于右键点击时自动选中文件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void lstFiles_MouseDown(object? sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                // 获取右键点击位置的索引
+                int index = lstFiles.IndexFromPoint(e.Location);
+                if (index != -1)
+                {
+                    // 选中点击位置的文件
+                    lstFiles.SelectedIndex = index;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 从文件夹打开菜单项点击事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void OpenFolderMenuItem_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(currentFilePath))
+                {
+                    // 打开文件所在文件夹并选中该文件
+                    System.Diagnostics.Process.Start("explorer.exe", $"/select,{currentFilePath}");
+                }
+                else
+                {
+                    // 如果没有选中文件，只打开文件夹
+                    System.Diagnostics.Process.Start("explorer.exe", _recordingsFolder);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("打开文件夹失败: " + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // --- 播放模式相关 ---        
+        /// <summary>
+        /// 播放模式选择事件
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void cmbPlaybackMode_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            ComboBox? comboBox = sender as ComboBox;
+            if (comboBox != null)
+            {
+                switch (comboBox.SelectedIndex)
+                {
+                    case 0: // 播完停止
+                        currentPlaybackMode = PlaybackMode.StopWhenFinished;
+                        break;
+                    case 1: // 单曲循环
+                        currentPlaybackMode = PlaybackMode.SingleLoop;
+                        break;
+                    case 2: // 顺序播放
+                        currentPlaybackMode = PlaybackMode.Sequential;
+                        break;
+                }
+            }
         }
 
     }
