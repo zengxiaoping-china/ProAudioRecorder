@@ -1,12 +1,14 @@
 using NAudio.Wave;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
-using System.Threading.Tasks;
 
 namespace ProAudioRecorder.AudioUtils
 {
     /// <summary>
-    /// 音频录制器类，负责音频的录制、暂停、恢复和停止等操作
+    /// 音频录制器类，负责音频的录制、暂停、恢复和停止等操作。
+    /// 暂停期间保持录音设备打开，但丢弃音频数据，避免暂停后无法正确停止和关闭文件。
     /// </summary>
     public class AudioRecorder : IDisposable
     {
@@ -25,19 +27,31 @@ namespace ProAudioRecorder.AudioUtils
         /// <summary>
         /// 是否正在录制
         /// </summary>
-        private bool isRecording = false;
+        private volatile bool isRecording = false;
         /// <summary>
         /// 是否暂停
         /// </summary>
-        private bool isPaused = false;
+        private volatile bool isPaused = false;
         /// <summary>
-        /// 录制开始时间
+        /// 是否正在停止录音，防止重复调用
         /// </summary>
-        private DateTime recordingStartTime;
+        private volatile bool isStopping = false;
         /// <summary>
-        /// 总暂停时长
+        /// 当前使用的录音设备编号
         /// </summary>
-        private TimeSpan totalPausedDuration = TimeSpan.Zero;
+        private int deviceNumber;
+        /// <summary>
+        /// 录音计时器
+        /// </summary>
+        private readonly Stopwatch recordingStopwatch = new Stopwatch();
+        /// <summary>
+        /// 已累计的暂停时长
+        /// </summary>
+        private TimeSpan pausedDuration = TimeSpan.Zero;
+        /// <summary>
+        /// 本次暂停的开始时间
+        /// </summary>
+        private DateTime pauseStartedAtUtc;
         /// <summary>
         /// 目标音量值（用于音量条显示）
         /// </summary>
@@ -48,9 +62,9 @@ namespace ProAudioRecorder.AudioUtils
         /// </summary>
         public event EventHandler<float>? VolumeChanged;
         /// <summary>
-        /// 波形数据改变事件
+        /// 波形数据改变事件（每次回调发送一批采样点，避免 UI 线程被大量事件淹没）
         /// </summary>
-        public event EventHandler<float>? WaveformDataChanged; // 新增：波形数据事件
+        public event EventHandler<float[]>? WaveformDataChanged;
         /// <summary>
         /// 录制开始事件
         /// </summary>
@@ -81,20 +95,26 @@ namespace ProAudioRecorder.AudioUtils
         /// </summary>
         public string CurrentFilePath => currentFilePath;
         /// <summary>
-        /// 当前录制时长
+        /// 当前使用的录音设备编号
+        /// </summary>
+        public int DeviceNumber => deviceNumber;
+
+        /// <summary>
+        /// 当前录制时长（不包含暂停时间）
         /// </summary>
         public TimeSpan CurrentDuration
         {
             get
             {
-                if (!isRecording && !isPaused)
+                if (!isRecording)
                     return TimeSpan.Zero;
 
+                TimeSpan paused = pausedDuration;
                 if (isPaused)
-                    return totalPausedDuration;
+                    paused += DateTime.UtcNow - pauseStartedAtUtc;
 
-                TimeSpan currentSegmentDuration = DateTime.Now - recordingStartTime;
-                return totalPausedDuration + currentSegmentDuration;
+                TimeSpan duration = recordingStopwatch.Elapsed - paused;
+                return duration < TimeSpan.Zero ? TimeSpan.Zero : duration;
             }
         }
 
@@ -111,79 +131,96 @@ namespace ProAudioRecorder.AudioUtils
 
             try
             {
-                // 准备文件路径
+                // 准备文件路径，使用毫秒避免同一秒内重复录音时覆盖文件
                 if (!Directory.Exists(outputDirectory))
                     Directory.CreateDirectory(outputDirectory);
 
-                string fileName = $"{DateTime.Now:yyyy-MM-dd-HHmmss}.wav";
+                string fileName = $"{DateTime.Now:yyyy-MM-dd-HHmmss-fff}.wav";
                 currentFilePath = Path.Combine(outputDirectory, fileName);
-                if (File.Exists(currentFilePath))
-                    File.Delete(currentFilePath);
+
+                this.deviceNumber = deviceNumber;
 
                 // 初始化录音设备
-                waveIn = new WaveInEvent();
-                waveIn.DeviceNumber = deviceNumber;
-                waveIn.WaveFormat = new WaveFormat(44100, 16, 1);
+                waveIn = new WaveInEvent
+                {
+                    DeviceNumber = deviceNumber,
+                    WaveFormat = new WaveFormat(44100, 16, 1)
+                };
                 waveIn.DataAvailable += WaveIn_DataAvailable;
                 waveIn.RecordingStopped += WaveIn_RecordingStopped;
 
                 // 准备写入文件
                 writer = new WaveFileWriter(currentFilePath, waveIn.WaveFormat);
 
-                // 开始录音
-                waveIn.StartRecording();
-                recordingStartTime = DateTime.Now;
+                // 重置状态
                 isRecording = true;
                 isPaused = false;
+                isStopping = false;
+                pausedDuration = TimeSpan.Zero;
+                recordingStopwatch.Restart();
+
+                // 开始录音
+                waveIn.StartRecording();
 
                 // 触发录制开始事件
                 RecordingStarted?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)
             {
+                CleanupAfterFailedStart();
                 throw new Exception("录音启动失败", ex);
             }
         }
 
         /// <summary>
-        /// 暂停录制
+        /// 启动失败时清理已分配的资源
+        /// </summary>
+        private void CleanupAfterFailedStart()
+        {
+            try
+            {
+                waveIn?.StopRecording();
+            }
+            catch
+            {
+                // 忽略清理阶段异常
+            }
+
+            waveIn?.Dispose();
+            waveIn = null;
+            writer?.Dispose();
+            writer = null;
+
+            recordingStopwatch.Reset();
+            pausedDuration = TimeSpan.Zero;
+            isRecording = false;
+            isPaused = false;
+            isStopping = false;
+        }
+
+        /// <summary>
+        /// 暂停录制。暂停期间录音设备保持打开，但不再写入文件。
         /// </summary>
         public void PauseRecording()
         {
-            if (!isRecording || isPaused)
+            if (!isRecording || isPaused || isStopping)
                 return;
 
             isPaused = true;
-            waveIn?.StopRecording();
-            
-            // 不释放 WaveFileWriter，避免文件被占用
-            // 继续录音时会继续使用这些资源
-            
-            // 触发录制暂停事件
+            pauseStartedAtUtc = DateTime.UtcNow;
             RecordingPaused?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
-        /// 恢复录制
+        /// 恢复录制。录音设备一直保持打开，无需重新创建设备。
         /// </summary>
         public void ResumeRecording()
         {
-            if (!isPaused)
+            if (!isRecording || !isPaused || isStopping)
                 return;
 
-            // 重新创建 WaveInEvent
-            waveIn = new WaveInEvent();
-            waveIn.DeviceNumber = 0; // 使用默认设备
-            waveIn.WaveFormat = new WaveFormat(44100, 16, 1);
-            waveIn.DataAvailable += WaveIn_DataAvailable;
-            waveIn.RecordingStopped += WaveIn_RecordingStopped;
-
-            waveIn.StartRecording();
-            recordingStartTime = DateTime.Now;
-            isRecording = true;
+            pausedDuration += DateTime.UtcNow - pauseStartedAtUtc;
             isPaused = false;
-
-            // 触发录制恢复事件
             RecordingResumed?.Invoke(this, EventArgs.Empty);
         }
 
@@ -192,11 +229,33 @@ namespace ProAudioRecorder.AudioUtils
         /// </summary>
         public void StopRecording()
         {
-            if (!isRecording && !isPaused)
+            if (!isRecording || isStopping)
                 return;
 
-            isPaused = false;
-            waveIn?.StopRecording();
+            isStopping = true;
+
+            // 暂停状态下停止时，先累计暂停时长
+            if (isPaused)
+            {
+                pausedDuration += DateTime.UtcNow - pauseStartedAtUtc;
+                isPaused = false;
+            }
+
+            if (waveIn == null)
+            {
+                FinalizeRecording();
+                return;
+            }
+
+            try
+            {
+                waveIn.StopRecording();
+            }
+            catch
+            {
+                // 某些驱动在异常状态下可能无法正常停止，直接收尾
+                FinalizeRecording();
+            }
         }
 
         /// <summary>
@@ -206,12 +265,16 @@ namespace ProAudioRecorder.AudioUtils
         /// <param name="e">事件参数</param>
         private void WaveIn_DataAvailable(object? sender, WaveInEventArgs e)
         {
+            // 暂停/停止期间丢弃数据，不写入文件
+            if (isPaused || isStopping || !isRecording || writer == null)
+                return;
+
             // 写入文件
-            writer?.Write(e.Buffer, 0, e.BytesRecorded);
+            writer.Write(e.Buffer, 0, e.BytesRecorded);
 
             // 计算音量峰值（用于音量条显示）
             float max = 0;
-            for (int i = 0; i < e.BytesRecorded; i += 2)
+            for (int i = 0; i + 1 < e.BytesRecorded; i += 2)
             {
                 // 解析 16 位音频样本
                 short sample = (short)((e.Buffer[i + 1] << 8) | e.Buffer[i]);
@@ -222,26 +285,34 @@ namespace ProAudioRecorder.AudioUtils
 
             // 更新音量（用于音量条显示），放大 5 倍并限制在 0-1 范围内
             targetValue = Math.Min(max * 5.0f, 1.0f);
-            
-            // 传递原始音频波形数据（用于波形显示）
-            // 降采样：只取部分样本，避免数据量过大
+
+            // 生成一批波形数据，避免每个采样点都触发一次 UI 更新
             int sampleCount = e.BytesRecorded / 2; // 每个样本 2 字节
-            int step = Math.Max(1, sampleCount / 100); // 每次只取 100 个样本，保证波形流畅度
-            
-            for (int i = 0; i < sampleCount; i += step)
+            if (sampleCount > 0)
             {
-                // 解析 16 位音频样本
-                short sample = (short)((e.Buffer[i * 2 + 1] << 8) | e.Buffer[i * 2]);
-                // 归一化到 -1.0 到 1.0 范围
-                float val = sample / 32768f; 
-                
-                // 放大波形数据，使波形更明显（放大 5 倍，与音量计算一致）
-                val = Math.Max(-1.0f, Math.Min(1.0f, val * 5.0f));
-                
-                // 触发波形数据事件
-                WaveformDataChanged?.Invoke(this, val);
+                int pointCount = Math.Min(100, sampleCount);
+                int step = Math.Max(1, sampleCount / pointCount);
+                var points = new List<float>(pointCount + 1);
+
+                for (int i = 0; i < sampleCount; i += step)
+                {
+                    int byteIndex = i * 2;
+                    if (byteIndex + 1 >= e.BytesRecorded)
+                        break;
+
+                    // 解析 16 位音频样本
+                    short sample = (short)((e.Buffer[byteIndex + 1] << 8) | e.Buffer[byteIndex]);
+                    // 归一化到 -1.0 到 1.0 范围
+                    float val = sample / 32768f;
+                    // 放大波形数据，使波形更明显（放大 5 倍，与音量计算一致）
+                    val = Math.Max(-1.0f, Math.Min(1.0f, val * 5.0f));
+                    points.Add(val);
+                }
+
+                if (points.Count > 0)
+                    WaveformDataChanged?.Invoke(this, points.ToArray());
             }
-            
+
             // 触发音量事件
             VolumeChanged?.Invoke(this, targetValue);
         }
@@ -253,43 +324,69 @@ namespace ProAudioRecorder.AudioUtils
         /// <param name="e">事件参数</param>
         private void WaveIn_RecordingStopped(object? sender, StoppedEventArgs e)
         {
-            if (isPaused)
-            {
-                // 计算暂停前的总时长并保存
-                TimeSpan lastSegment = DateTime.Now - recordingStartTime;
-                totalPausedDuration += lastSegment;
-                
-                // 暂停时不释放 writer，因为继续录音时还需要使用
-                waveIn?.Dispose();
-                waveIn = null;
-                return;
-            }
+            FinalizeRecording();
+        }
 
-            // 停止录音时释放所有资源
+        /// <summary>
+        /// 释放录制资源并触发停止事件
+        /// </summary>
+        private void FinalizeRecording()
+        {
+            if (!isRecording && waveIn == null && writer == null)
+                return;
+
+            // 先阻止后续数据回调写入，再释放资源
+            isStopping = true;
+            isRecording = false;
+            isPaused = false;
+
             waveIn?.Dispose();
             waveIn = null;
             writer?.Dispose();
             writer = null;
 
-            // 重置状态
-            isRecording = false;
-            isPaused = false;
-            totalPausedDuration = TimeSpan.Zero;
+            recordingStopwatch.Reset();
+            pausedDuration = TimeSpan.Zero;
+            isStopping = false;
 
-            // 触发录制停止事件
             RecordingStopped?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
-        /// 释放资源
+        /// 释放资源。录制过程中调用会同步完成文件收尾。
         /// </summary>
         public void Dispose()
         {
-            // 停止录制
-            StopRecording();
-            // 释放资源
+            if (!isRecording && waveIn == null && writer == null)
+                return;
+
+            // 先阻止后续数据回调写入
+            isStopping = true;
+            isRecording = false;
+            isPaused = false;
+
+            try
+            {
+                if (waveIn != null)
+                {
+                    waveIn.DataAvailable -= WaveIn_DataAvailable;
+                    waveIn.RecordingStopped -= WaveIn_RecordingStopped;
+                    waveIn.StopRecording();
+                }
+            }
+            catch
+            {
+                // 忽略释放阶段异常
+            }
+
             waveIn?.Dispose();
+            waveIn = null;
             writer?.Dispose();
+            writer = null;
+
+            recordingStopwatch.Reset();
+            pausedDuration = TimeSpan.Zero;
+            isStopping = false;
         }
     }
 }

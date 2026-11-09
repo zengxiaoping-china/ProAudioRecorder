@@ -1,5 +1,6 @@
 using NAudio.Wave;
 using System;
+using System.Collections.Generic;
 
 namespace ProAudioRecorder.AudioUtils
 {
@@ -26,9 +27,9 @@ namespace ProAudioRecorder.AudioUtils
         /// </summary>
         public event EventHandler<float>? VolumeChanged;
         /// <summary>
-        /// 波形数据改变事件
+        /// 波形数据改变事件（每次触发发送一批采样点）
         /// </summary>
-        public event EventHandler<float>? WaveformDataChanged;
+        public event EventHandler<float[]>? WaveformDataChanged;
 
         /// <summary>
         /// 波形格式
@@ -70,22 +71,29 @@ namespace ProAudioRecorder.AudioUtils
                 // 触发音量改变事件
                 VolumeChanged?.Invoke(this, maxSample);
 
-                // 处理波形数据
+                // 收集本次读取产生的波形点，最后一次性发送
+                List<float>? waveformPoints = null;
+
                 for (int i = 0; i < samplesRead; i++)
                 {
                     samplesSinceLastWaveEvent++;
-                    // 每隔一定采样数触发一次波形数据事件
+                    // 每隔一定采样数记录一个波形点
                     if (samplesSinceLastWaveEvent >= SamplesPerWaveEvent)
                     {
                         float val = buffer[offset + i];
                         // 放大波形数据，使波形更明显（放大 5 倍）
                         val = Math.Max(-1.0f, Math.Min(1.0f, val * 5.0f));
-                        // 触发波形数据改变事件
-                        WaveformDataChanged?.Invoke(this, val);
+
+                        waveformPoints ??= new List<float>();
+                        waveformPoints.Add(val);
+
                         // 重置计数器
                         samplesSinceLastWaveEvent = 0;
                     }
                 }
+
+                if (waveformPoints is { Count: > 0 })
+                    WaveformDataChanged?.Invoke(this, waveformPoints.ToArray());
             }
 
             return samplesRead;

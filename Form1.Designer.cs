@@ -168,7 +168,7 @@
             lblDuration.Name = "lblDuration";
             lblDuration.Size = new Size(63, 17);
             lblDuration.TabIndex = 12;
-            lblDuration.Text = "00:00:000";
+            lblDuration.Text = "00:00:00";
             // 
             // timerRecording
             // 

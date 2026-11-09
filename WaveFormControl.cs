@@ -57,8 +57,25 @@ namespace ProAudioRecorder
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
         public int MaxPoints
         {
-            get { return _maxPoints; }
-            set { _maxPoints = value; }
+            get
+            {
+                lock (_lockObject)
+                {
+                    return _maxPoints;
+                }
+            }
+            set
+            {
+                lock (_lockObject)
+                {
+                    _maxPoints = Math.Max(2, value);
+                    while (_audioPoints.Count > _maxPoints)
+                    {
+                        _audioPoints.Dequeue();
+                    }
+                }
+                this.Invalidate();
+            }
         }
 
         /// <summary>
@@ -155,21 +172,50 @@ namespace ProAudioRecorder
         {
             lock (_lockObject)
             {
-                // 1. 把新数据加进来
                 _audioPoints.Enqueue(value);
-                
-                // 2. 开始绘制
                 _isDrawing = true;
 
-                // 3.如果数据量超过了 MaxPoints，必须把最早的数据踢出去
                 while (_audioPoints.Count > _maxPoints)
                 {
                     _audioPoints.Dequeue();
                 }
-
-                // 4. 触发重绘
-                this.Invalidate();
             }
+
+            this.Invalidate();
+        }
+
+        /// <summary>
+        /// 批量添加浮点值到波形数据中，只触发一次重绘
+        /// </summary>
+        /// <param name="values">音频数据值集合（范围：-1.0 到 1.0）</param>
+        public void AddValues(IEnumerable<float> values)
+        {
+            if (values == null)
+                return;
+
+            bool added = false;
+
+            lock (_lockObject)
+            {
+                foreach (float value in values)
+                {
+                    _audioPoints.Enqueue(value);
+                    added = true;
+                }
+
+                if (!added)
+                    return;
+
+                _isDrawing = true;
+
+                while (_audioPoints.Count > _maxPoints)
+                {
+                    _audioPoints.Dequeue();
+                }
+            }
+
+            // 一批数据只触发一次重绘
+            this.Invalidate();
         }
 
         // --- 绘图逻辑 ---

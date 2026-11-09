@@ -54,7 +54,11 @@ namespace ProAudioRecorder
             }
 
             // 绘制进度条
-            double scaleFactor = (((double)this.Value - this.Minimum) / ((double)this.Maximum - this.Minimum));
+            int range = this.Maximum - this.Minimum;
+            double scaleFactor = range > 0
+                ? (((double)this.Value - this.Minimum) / range)
+                : 0.0;
+            scaleFactor = Math.Max(0.0, Math.Min(1.0, scaleFactor));
             int width = (int)((double)rec.Width * scaleFactor);
             
             if (width > 0)

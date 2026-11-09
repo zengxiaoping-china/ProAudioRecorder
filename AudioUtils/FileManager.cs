@@ -1,5 +1,6 @@
 using NAudio.Wave;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -18,7 +19,7 @@ namespace ProAudioRecorder.AudioUtils
         /// <summary>
         /// 文件时长缓存，避免重复读取文件
         /// </summary>
-        private Dictionary<string, TimeSpan> _fileDurationsCache = new Dictionary<string, TimeSpan>();
+        private readonly ConcurrentDictionary<string, TimeSpan> _fileDurationsCache = new();
 
         /// <summary>
         /// 录音文件存储目录
@@ -120,7 +121,7 @@ namespace ProAudioRecorder.AudioUtils
                 {
                     File.Delete(filePath);
                     // 从缓存中移除
-                    _fileDurationsCache.Remove(fileName);
+                    _fileDurationsCache.TryRemove(fileName, out _);
                     // 不再自动触发事件，由调用方手动处理
                     // FilesUpdated?.Invoke(this, EventArgs.Empty);
                 }
@@ -159,6 +160,11 @@ namespace ProAudioRecorder.AudioUtils
         public TimeSpan Duration { get; }
 
         /// <summary>
+        /// 列表中显示的名称，格式为 "文件名 [mm:ss]"
+        /// </summary>
+        public string DisplayName => $"{FileName} [{Duration.ToString(@"mm\:ss")}]";
+
+        /// <summary>
         /// 构造函数
         /// </summary>
         /// <param name="filePath">文件路径</param>
@@ -177,7 +183,7 @@ namespace ProAudioRecorder.AudioUtils
         /// <returns>带有时长的文件名</returns>
         public override string ToString()
         {
-            return $"{FileName} [{Duration.ToString(@"mmss")}]";
+            return DisplayName;
         }
     }
 }
